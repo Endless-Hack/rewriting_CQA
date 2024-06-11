@@ -9,8 +9,8 @@ import math
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from dataset import TestDataset
-from model import KGReasoning
+from dataset import TestDataset, TestRewriteDataset
+from model import KGReasoning, MyTransformerEncoder
 import time
 import pickle
 from collections import defaultdict
@@ -84,6 +84,9 @@ def parse_args(args=None):
     parser.add_argument('--tasks', default='1p.2p.3p.2i.3i.ip.pi.2in.3in.inp.pin.pni.2u.up', type=str, help="tasks connected by dot, refer to the BetaE paper for detailed meaning and structure of each task")
     parser.add_argument('--seed', default=12345, type=int, help="random seed")
     parser.add_argument('-evu', '--evaluate_union', default="DNF", type=str, choices=['DNF', 'DM'], help='the way to evaluate union queries, transform it to disjunctive normal form (DNF) or use the De Morgan\'s laws (DM)')
+    # 用来重写
+    parser.add_argument('--query_rew', action='store_true',
+                        help="evaluate queries via TBox rewriting")
 
     return parser.parse_args(args)
 
@@ -285,87 +288,231 @@ def evaluate(model, tp_answers, fn_answers, args, dataloader, query_name_dict, d
     rates = defaultdict(list)
     probs = defaultdict(list)
     cards = defaultdict(list)
-    for queries, queries_unflatten, query_structures in tqdm(dataloader):
-        queries = torch.LongTensor(queries).to(device)
-        embedding, _, exec_query = model.embed_query(queries, query_structures[0], 0)
-        embedding = embedding.squeeze()
+    if args.query_rew:
+        # 从重写测试集读取重写 query
+        for queries, queries_unflatten, query_structures, specializations in tqdm(dataloader):
+            """
+                queries: [[8815, 765]],
+                query_structures: [('e', ('r',))],
+                specializations: [[([830, 77], 1.0, ('e', ('r',))), 
+                            ([830, 44], 0.8337468982630273, ('e', ('r',)))]],
+            """
+            queries = torch.LongTensor(queries).to(device)
+            if specializations is not None:
+                batch_spe_queries_dict = collections.defaultdict(
+                    list)  # dict: q_shape -> [flatten queries of this shape]
+                batch_spe_idxs_dict = collections.defaultdict(
+                    list)  # dict: q_shape -> [idx1,....,idxn from specialized queries]
+                batch_query_idx_spe_idxes = collections.defaultdict(
+                    list)  # dict: q_shape -> [idx1,....,idxn from specialized queries]
+                batch_spe_confs_dict = collections.defaultdict(
+                    list)  # dict: q_shape -> [conf1,...,confn from specialized queries]
+                # max_number_spe_queries_per_train_query = 0;
+                q_idx = 0
+                for i, spe_queries in enumerate(specializations):
+                    # if len(spe_queries) > max_number_spe_queries_per_train_query:
+                    # max_number_spe_queries_per_train_query = len(spe_queries)
+                    # 对于每个query set
+                    for spe_idx, each_query in enumerate(spe_queries):
+                        """
+                            each_query: query_set中每个query ([10317, 107], 0.8, ('e', ('r',))))
+                        """
+                        batch_spe_queries_dict[each_query[-1]].append([each_query[0]])
+                        batch_spe_confs_dict[each_query[-1]].append(each_query[1])
+                        # append id of original query
+                        batch_spe_idxs_dict[each_query[-1]].append(q_idx)
+                        # print('ppp %d'%(spe_idx))
+                        batch_query_idx_spe_idxes[i].append(q_idx)
+                        q_idx += 1
+                for spe_query_structure in batch_spe_queries_dict:
+                    if torch.cuda.is_available():
+                        batch_spe_queries_dict[spe_query_structure] = torch.LongTensor(
+                            batch_spe_queries_dict[spe_query_structure]).cuda()
+                    else:
+                        batch_spe_queries_dict[spe_query_structure] = torch.LongTensor(
+                            batch_spe_queries_dict[spe_query_structure])
+            
+            # 创建一个query set的embedding
+            embedding_list = []
+            for each_query in batch_spe_queries_dict[query_structures[0]]:   
+                # each_query_tensor = torch.LongTensor(each_query).to(device)            
+                embedding, _, exec_query = model.embed_query(each_query, query_structures[0], 0)
+                embedding = embedding.squeeze()
+                # print("embedding: ", embedding)
+                # 融合embedding进入query_set_embedding
+                embedding_list.append(embedding)
+            # (query_num, entity_num)
+            query_set_embedding = torch.stack(embedding_list, dim=0).to(device)
 
-        order = torch.argsort(embedding, dim=-1, descending=True)
-        ranking = torch.argsort(order)
-        # eval
-        hard_answer = tp_answers[queries_unflatten[0]]
-        easy_answer = fn_answers[queries_unflatten[0]]
-        num_hard = len(hard_answer)
-        num_easy = len(easy_answer)
-        cur_ranking = ranking[list(easy_answer) + list(hard_answer)]
-        all_path, h1_path, h3_path, h10_path = 0, 0, 0, 0
-        num_h1, num_h3, num_h10 = 0, 0, 0
-        if args.path:
-            for root in list(hard_answer):
-                rank = ranking[root]
-                rank -= ((cur_ranking < rank).sum()-1)
-                ans, _ = model.find_ans(exec_query, query_structures[0], root)
-                mapping = dict()
-                judge, out = verify(name_answer_dict[query_name_dict[query_structures[0]]], ans, edges_y, edges_p)
-                if judge:
-                    all_path += 1
-                if rank <= 1:
-                    num_h1 += 1
+            # 利用transformer 聚合query embedding
+            transformer_model = MyTransformerEncoder(14951, 14952, 14951).cuda()
+            query_set_embedding = transformer_model(query_set_embedding)
+            query_agg_embedding, _ = torch.max(query_set_embedding, dim=0)
+            
+            order = torch.argsort(query_agg_embedding, dim=-1, descending=True)
+            ranking = torch.argsort(order)
+            
+            # eval
+            hard_answer = tp_answers[queries_unflatten[0]] # set
+            easy_answer = fn_answers[queries_unflatten[0]]
+            num_hard = len(hard_answer)
+            num_easy = len(easy_answer)
+            cur_ranking = ranking[list(easy_answer) + list(hard_answer)]
+            all_path, h1_path, h3_path, h10_path = 0, 0, 0, 0
+            num_h1, num_h3, num_h10 = 0, 0, 0
+            if args.path:
+                for root in list(hard_answer):
+                    rank = ranking[root]
+                    rank -= ((cur_ranking < rank).sum()-1)
+                    ans, _ = model.find_ans(exec_query, query_structures[0], root)
+                    mapping = dict()
+                    judge, out = verify(name_answer_dict[query_name_dict[query_structures[0]]], ans, edges_y, edges_p)
                     if judge:
-                        h1_path += 1
-                if rank <= 3:
-                    num_h3 += 1
-                    if judge:
-                        h3_path += 1
-                if rank <= 10:
-                    num_h10 += 1
-                    if judge:
-                        h10_path += 1
-                print(judge, rank.item())
-                print(out, mapping)
-        if args.do_cp:
-            probs[query_structures[0]].append(embedding.to('cpu'))
-            cards[query_structures[0]].append(torch.tensor([num_hard+num_easy]))
-        cur_ranking, indices = torch.sort(cur_ranking)
-        masks_hard = indices >= num_easy
-        masks_easy = indices < num_easy
-        answer_list = torch.arange(num_hard + num_easy).to(torch.float).to(device)
-        cur_ranking = cur_ranking - answer_list + 1 # filtered setting
-        cur_ranking_hard = cur_ranking[masks_hard] # take indices that belong to the hard answers
-        cur_ranking_easy = cur_ranking[masks_easy] # take indices that belong to the easy answers
+                        all_path += 1
+                    if rank <= 1:
+                        num_h1 += 1
+                        if judge:
+                            h1_path += 1
+                    if rank <= 3:
+                        num_h3 += 1
+                        if judge:
+                            h3_path += 1
+                    if rank <= 10:
+                        num_h10 += 1
+                        if judge:
+                            h10_path += 1
+                    print(judge, rank.item())
+                    print(out, mapping)
+            if args.do_cp:
+                probs[query_structures[0]].append(embedding.to('cpu'))
+                cards[query_structures[0]].append(torch.tensor([num_hard+num_easy]))
+            cur_ranking, indices = torch.sort(cur_ranking)
+            masks_hard = indices >= num_easy
+            masks_easy = indices < num_easy
+            answer_list = torch.arange(num_hard + num_easy).to(torch.float).to(device)
+            cur_ranking = cur_ranking - answer_list + 1 # filtered setting
+            # 由于多个query答案取最小，可能出现多个查询排名第一的情况 相减可能出现小于等于0的情况
+            cur_ranking = torch.where(cur_ranking <= 0, torch.tensor(1), cur_ranking)
+            cur_ranking_hard = cur_ranking[masks_hard] # take indices that belong to the hard answers
+            cur_ranking_easy = cur_ranking[masks_easy] # take indices that belong to the easy answers
 
-        mrr_hard = torch.mean(1./cur_ranking_hard).item()
-        h1_hard = torch.mean((cur_ranking_hard <= 1).to(torch.float)).item()
-        h3_hard = torch.mean((cur_ranking_hard <= 3).to(torch.float)).item()
-        h10_hard = torch.mean((cur_ranking_hard <= 10).to(torch.float)).item()
-        mrr_easy = torch.mean(1./cur_ranking_easy).item()
-        h1_easy = torch.mean((cur_ranking_easy <= 1).to(torch.float)).item()
-        h3_easy = torch.mean((cur_ranking_easy <= 3).to(torch.float)).item()
-        h10_easy = torch.mean((cur_ranking_easy <= 10).to(torch.float)).item()
-        if num_easy == 0:
-            mrr_easy, h1_easy, h3_easy, h10_easy = 1, 1, 1, 1
+            mrr_hard = torch.mean(1./cur_ranking_hard).item()
+            h1_hard = torch.mean((cur_ranking_hard <= 1).to(torch.float)).item()
+            h3_hard = torch.mean((cur_ranking_hard <= 3).to(torch.float)).item()
+            h10_hard = torch.mean((cur_ranking_hard <= 10).to(torch.float)).item()
+            mrr_easy = torch.mean(1./cur_ranking_easy).item()
+            h1_easy = torch.mean((cur_ranking_easy <= 1).to(torch.float)).item()
+            h3_easy = torch.mean((cur_ranking_easy <= 3).to(torch.float)).item()
+            h10_easy = torch.mean((cur_ranking_easy <= 10).to(torch.float)).item()
+            if num_easy == 0:
+                mrr_easy, h1_easy, h3_easy, h10_easy = 1, 1, 1, 1
 
-        logs[query_structures[0]].append({
-            'MRR_hard': mrr_hard,
-            'HITS1_hard': h1_hard,
-            'HITS3_hard': h3_hard,
-            'HITS10_hard': h10_hard,
-            'num_hard_answer': num_hard,
-            'MRR_easy': mrr_easy,
-            'HITS1_easy': h1_easy,
-            'HITS3_easy': h3_easy,
-            'HITS10_easy': h10_easy,
-            'num_easy_answer': num_easy,
-        })
-        if args.path:
-            if num_hard > 0:
-                rates[query_name_dict[query_structures[0]]+" all path interpretability"].append(all_path / num_hard)
-            if num_h1 > 0:
-                rates[query_name_dict[query_structures[0]]+" HITS1 path interpretability"].append(h1_path / num_h1)
-            if num_h3 > 0:
-                rates[query_name_dict[query_structures[0]]+" HITS3 path interpretability"].append(h3_path / num_h3)
-            if num_h10 > 0:
-                rates[query_name_dict[query_structures[0]]+" HITS10 path interpretability"].append(h10_path / num_h10)
+            logs[query_structures[0]].append({
+                'MRR_hard': mrr_hard,
+                'HITS1_hard': h1_hard,
+                'HITS3_hard': h3_hard,
+                'HITS10_hard': h10_hard,
+                'num_hard_answer': num_hard,
+                'MRR_easy': mrr_easy,
+                'HITS1_easy': h1_easy,
+                'HITS3_easy': h3_easy,
+                'HITS10_easy': h10_easy,
+                'num_easy_answer': num_easy,
+            })
+            if args.path:
+                if num_hard > 0:
+                    rates[query_name_dict[query_structures[0]]+" all path interpretability"].append(all_path / num_hard)
+                if num_h1 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS1 path interpretability"].append(h1_path / num_h1)
+                if num_h3 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS3 path interpretability"].append(h3_path / num_h3)
+                if num_h10 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS10 path interpretability"].append(h10_path / num_h10)
+    
+    else:
+        for queries, queries_unflatten, query_structures in tqdm(dataloader):
+            queries = torch.LongTensor(queries).to(device)
+            embedding, _, exec_query = model.embed_query(queries, query_structures[0], 0)
+            embedding = embedding.squeeze()
+
+            order = torch.argsort(embedding, dim=-1, descending=True)
+            ranking = torch.argsort(order)
+            
+            # eval
+            hard_answer = tp_answers[queries_unflatten[0]]
+            easy_answer = fn_answers[queries_unflatten[0]]
+            num_hard = len(hard_answer)
+            num_easy = len(easy_answer)
+            cur_ranking = ranking[list(easy_answer) + list(hard_answer)]
+            all_path, h1_path, h3_path, h10_path = 0, 0, 0, 0
+            num_h1, num_h3, num_h10 = 0, 0, 0
+            if args.path:
+                for root in list(hard_answer):
+                    rank = ranking[root]
+                    rank -= ((cur_ranking < rank).sum()-1)
+                    ans, _ = model.find_ans(exec_query, query_structures[0], root)
+                    mapping = dict()
+                    judge, out = verify(name_answer_dict[query_name_dict[query_structures[0]]], ans, edges_y, edges_p)
+                    if judge:
+                        all_path += 1
+                    if rank <= 1:
+                        num_h1 += 1
+                        if judge:
+                            h1_path += 1
+                    if rank <= 3:
+                        num_h3 += 1
+                        if judge:
+                            h3_path += 1
+                    if rank <= 10:
+                        num_h10 += 1
+                        if judge:
+                            h10_path += 1
+                    print(judge, rank.item())
+                    print(out, mapping)
+            if args.do_cp:
+                probs[query_structures[0]].append(embedding.to('cpu'))
+                cards[query_structures[0]].append(torch.tensor([num_hard+num_easy]))
+            cur_ranking, indices = torch.sort(cur_ranking)
+            masks_hard = indices >= num_easy
+            masks_easy = indices < num_easy
+            answer_list = torch.arange(num_hard + num_easy).to(torch.float).to(device)
+            cur_ranking = cur_ranking - answer_list + 1 # filtered setting
+            cur_ranking_hard = cur_ranking[masks_hard] # take indices that belong to the hard answers
+            cur_ranking_easy = cur_ranking[masks_easy] # take indices that belong to the easy answers
+
+            mrr_hard = torch.mean(1./cur_ranking_hard).item()
+            h1_hard = torch.mean((cur_ranking_hard <= 1).to(torch.float)).item()
+            h3_hard = torch.mean((cur_ranking_hard <= 3).to(torch.float)).item()
+            h10_hard = torch.mean((cur_ranking_hard <= 10).to(torch.float)).item()
+            mrr_easy = torch.mean(1./cur_ranking_easy).item()
+            h1_easy = torch.mean((cur_ranking_easy <= 1).to(torch.float)).item()
+            h3_easy = torch.mean((cur_ranking_easy <= 3).to(torch.float)).item()
+            h10_easy = torch.mean((cur_ranking_easy <= 10).to(torch.float)).item()
+            if num_easy == 0:
+                mrr_easy, h1_easy, h3_easy, h10_easy = 1, 1, 1, 1
+
+            logs[query_structures[0]].append({
+                'MRR_hard': mrr_hard,
+                'HITS1_hard': h1_hard,
+                'HITS3_hard': h3_hard,
+                'HITS10_hard': h10_hard,
+                'num_hard_answer': num_hard,
+                'MRR_easy': mrr_easy,
+                'HITS1_easy': h1_easy,
+                'HITS3_easy': h3_easy,
+                'HITS10_easy': h10_easy,
+                'num_easy_answer': num_easy,
+            })
+            if args.path:
+                if num_hard > 0:
+                    rates[query_name_dict[query_structures[0]]+" all path interpretability"].append(all_path / num_hard)
+                if num_h1 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS1 path interpretability"].append(h1_path / num_h1)
+                if num_h3 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS3 path interpretability"].append(h3_path / num_h3)
+                if num_h10 > 0:
+                    rates[query_name_dict[query_structures[0]]+" HITS10 path interpretability"].append(h10_path / num_h10)
+    
     if args.path:
         rate_metric = defaultdict(float)
         for query_structure in rates:
@@ -416,12 +563,23 @@ def load_data(args, tasks):
     Load queries and remove queries not in tasks
     '''
     logging.info("loading data")
-    valid_queries = pickle.load(open(os.path.join(args.data_path, "valid-queries.pkl"), 'rb'))
-    valid_hard_answers = pickle.load(open(os.path.join(args.data_path, "valid-hard-answers.pkl"), 'rb'))
-    valid_easy_answers = pickle.load(open(os.path.join(args.data_path, "valid-easy-answers.pkl"), 'rb'))
-    test_queries = pickle.load(open(os.path.join(args.data_path, "test-queries.pkl"), 'rb'))
-    test_hard_answers = pickle.load(open(os.path.join(args.data_path, "test-hard-answers.pkl"), 'rb'))
-    test_easy_answers = pickle.load(open(os.path.join(args.data_path, "test-easy-answers.pkl"), 'rb'))
+    if args.query_rew:
+        logging.info('start reading rewriting queries:')
+        test_specializations = pickle.load(open(os.path.join(args.data_path, "rewriting-test-queries.pkl"), 'rb'))
+        test_hard_answers = pickle.load(open(os.path.join(args.data_path, "test-hard-answers.pkl"), 'rb'))
+        test_easy_answers = pickle.load(open(os.path.join(args.data_path, "test-easy-answers.pkl"), 'rb'))
+        test_queries = pickle.load(open(os.path.join(args.data_path, "test-queries.pkl"), 'rb'))
+        valid_queries = pickle.load(open(os.path.join(args.data_path, "valid-queries.pkl"), 'rb'))
+        valid_hard_answers = pickle.load(open(os.path.join(args.data_path, "valid-hard-answers.pkl"), 'rb'))
+        valid_easy_answers = pickle.load(open(os.path.join(args.data_path, "valid-easy-answers.pkl"), 'rb'))
+    else:
+        valid_queries = pickle.load(open(os.path.join(args.data_path, "valid-queries.pkl"), 'rb'))
+        valid_hard_answers = pickle.load(open(os.path.join(args.data_path, "valid-hard-answers.pkl"), 'rb'))
+        valid_easy_answers = pickle.load(open(os.path.join(args.data_path, "valid-easy-answers.pkl"), 'rb'))
+        test_hard_answers = pickle.load(open(os.path.join(args.data_path, "test-hard-answers.pkl"), 'rb'))
+        test_easy_answers = pickle.load(open(os.path.join(args.data_path, "test-easy-answers.pkl"), 'rb'))
+        test_queries = pickle.load(open(os.path.join(args.data_path, "test-queries.pkl"), 'rb'))
+        test_specializations = None       
     
     # remove tasks not in args.tasks
     for name in all_tasks:
@@ -436,7 +594,7 @@ def load_data(args, tasks):
             if query_structure in test_queries:
                 del test_queries[query_structure]
 
-    return valid_queries, valid_hard_answers, valid_easy_answers, test_queries, test_hard_answers, test_easy_answers
+    return valid_queries, valid_hard_answers, valid_easy_answers, test_queries, test_hard_answers, test_easy_answers, test_specializations
 
 def main(args):
     set_global_seed(args.seed)
@@ -468,7 +626,8 @@ def main(args):
 
     adj_list, edges_y, edges_p = read_triples([os.path.join(args.data_path, "train.txt")], args.nrelation, args.data_path)
 
-    valid_queries, valid_hard_answers, valid_easy_answers, test_queries, test_hard_answers, test_easy_answers = load_data(args, tasks)
+    valid_queries, valid_hard_answers, valid_easy_answers, test_queries, test_hard_answers, test_easy_answers, test_specializations = load_data(
+        args, tasks)
     
     valid_queries = flatten_query(valid_queries)
     valid_dataloader = DataLoader(
@@ -483,23 +642,38 @@ def main(args):
     )
 
     test_queries = flatten_query(test_queries)
-    test_dataloader = DataLoader(
-        TestDataset(
-            test_queries, 
-            args.nentity, 
-            args.nrelation, 
-        ), 
-        batch_size=args.test_batch_size,
-        num_workers=args.cpu_num, 
-        collate_fn=TestDataset.collate_fn
-    )
+    if args.query_rew:
+        test_dataloader = DataLoader(
+            TestRewriteDataset(
+                test_queries,
+                args.nentity,
+                args.nrelation,
+                test_specializations
+            ),
+            batch_size=args.test_batch_size,
+            num_workers=args.cpu_num,
+            collate_fn=TestRewriteDataset.collate_fn
+        )
+    else:
+        test_dataloader = DataLoader(
+            TestDataset(
+                test_queries,
+                args.nentity,
+                args.nrelation,
+            ),
+            batch_size=args.test_batch_size,
+            num_workers=args.cpu_num,
+            collate_fn=TestDataset.collate_fn
+        )
     
+    # 初始化 model 即是得到 relation embedding
     model = KGReasoning(args, device, adj_list, query_name_dict, name_answer_dict)
 
     cp_thrshd = None
     if args.do_cp:
         cp_thrshd = get_cp_thrshd(model, valid_hard_answers, valid_easy_answers, args, valid_dataloader, query_name_dict, device)
     
+    # 对test做测试
     evaluate(model, test_hard_answers, test_easy_answers, args, test_dataloader, query_name_dict, device, writer, edges_y, edges_p, cp_thrshd)
 
 if __name__ == '__main__':

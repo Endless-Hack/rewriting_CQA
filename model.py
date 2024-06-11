@@ -69,9 +69,11 @@ class KGReasoning(nn.Module):
             dataset_name += "-237"
         filename = 'neural_adj/'+dataset_name+'_'+str(args.fraction)+'_'+str(args.thrshd)+'.pt'
         if os.path.exists(filename):
+            print("loading model...")
             self.relation_embeddings = torch.load(filename, map_location=device)
         else:
             kbc_model = load_kbc(args.kbc_path, device, args.nentity, args.nrelation)
+            # 创建邻接矩阵 M(i, j)为实体i 和 实体j 的score
             for i in tqdm(range(args.nrelation)):
                 relation_embedding = neural_adj_matrix(kbc_model, i, args.nentity, device, args.thrshd, adj_list[i])
                 relation_embedding = (relation_embedding>=1).to(torch.float) * 0.9999 + (relation_embedding<1).to(torch.float) * relation_embedding
@@ -127,14 +129,19 @@ class KGReasoning(nn.Module):
         '''
         Iterative embed a batch of queries with same structure
         queries: a flattened batch of queries
+        query_structure: ('e', ('r',)),
+        specializations: [[([830, 77], 1.0, ('e', ('r',))), 
+                            ([830, 44], 0.8337468982630273, ('e', ('r',)))]],
         '''
         all_relation_flag = True
         exec_query = []
         for ele in query_structure[-1]: # whether the current query tree has merged to one branch and only need to do relation traversal, e.g., path queries or conjunctive queries after the intersection
+            # 最后一跳不是 映射或者否定
             if ele not in ['r', 'n']:
                 all_relation_flag = False
                 break
         if all_relation_flag:
+            # 起始位为 实体
             if query_structure[0] == 'e':
                 bsz = queries.size(0)
                 embedding = torch.zeros(bsz, self.nentity).to(torch.float).to(self.device)
@@ -180,7 +187,7 @@ class KGReasoning(nn.Module):
             else:
                 embedding = self.intersection(torch.stack(embedding_list))
             exec_query.append('e')
-        
+        # print("embedding: ", embedding)
         return embedding, idx, exec_query
 
     def find_ans(self, exec_query, query_structure, anchor):
@@ -221,3 +228,24 @@ class KGReasoning(nn.Module):
                 ans.append(ele_ans)
             ans.append(anchor)
             return ans, ele_ent
+
+# 多头跟embedding_size不匹配的问题？
+# encoder_layer = nn.TransformerEncoderLayer(d_model=14951, nhead=1, dim_feedforward=8192).cuda()
+# Transformer_Encoder = nn.TransformerEncoder(encoder_layer, num_layers=2).cuda()
+
+class MyTransformerEncoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(MyTransformerEncoder, self).__init__()
+        self.up_dim = nn.Linear(input_dim, hidden_dim)
+        self.encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=8, dim_feedforward=8192)
+        self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=2)
+        self.down_dim = nn.Linear(hidden_dim, output_dim)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Input shape: (seq_length, batch_size, input_dim)
+        x = self.up_dim(x)  # Up-dimension: (seq_length, batch_size, hidden_dim)
+        x = self.transformer_encoder(x)  # Transformer encoder
+        x = self.down_dim(x)  # Down-dimension: (seq_length, batch_size, output_dim)
+        x = self.sigmoid(x)
+        return x

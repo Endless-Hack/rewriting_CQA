@@ -1,0 +1,16 @@
+results/
+KGE_models/
+data/
+neural_adj/
+.idea/
+*.txt
+/kbc/src/
+/kbc/doc/
+/kbc/FB15K/
+/kbc/FB15K-237/
+/kbc/NELL995/
+*.md
+figs
+*.sh
+*.out
+/__pycache__

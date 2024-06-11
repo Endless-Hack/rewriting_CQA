@@ -346,10 +346,8 @@ def evaluate(model, tp_answers, fn_answers, args, dataloader, query_name_dict, d
             batch_spe_confs_list = batch_spe_confs_dict[query_structures[0]]
             set_num = query_set_embedding.shape[0]
             query_set_embedding = query_set_embedding * torch.tensor([batch_spe_confs_list]).T.cuda()
-            # 基于score进行聚合 1.对各个query score取max
-            query_set_embedding, _ = torch.max(query_set_embedding, dim=0)
-            # (entity_num)
-            query_set_embedding = query_set_embedding.squeeze()
+            # 基于score进行聚合 2.对各个query score取noisy-or
+            query_set_embedding = 1 - torch.prod(1 - query_set_embedding, dim=0)  # (entity_num) 
             # 降序排列
             order = torch.argsort(query_set_embedding, dim=-1, descending=True)
             # ranking的index代表对应实体id，index上的值代表实体排名 [2,1,3]->实体0排名第2

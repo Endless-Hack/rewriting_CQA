@@ -672,7 +672,6 @@ def main(args):
     if args.do_cp:
         cp_thrshd = get_cp_thrshd(model, valid_hard_answers, valid_easy_answers, args, valid_dataloader, query_name_dict, device)
     
-    # 对test做测试
     evaluate(model, test_hard_answers, test_easy_answers, args, test_dataloader, query_name_dict, device, writer, edges_y, edges_p, cp_thrshd)
 
 if __name__ == '__main__':

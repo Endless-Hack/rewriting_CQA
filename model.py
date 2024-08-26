@@ -89,6 +89,7 @@ class KGReasoning(nn.Module):
                     if i == args.fraction - 1:
                         t += rest
                     fractional_relation_embedding.append(relation_embedding[s:t, :].to_sparse().to(self.device))
+                # 将每个relation embedding分片，添加到relation_embeddings这个列表里
                 self.relation_embeddings.append(fractional_relation_embedding)
             torch.save(self.relation_embeddings, filename)
 
@@ -102,20 +103,22 @@ class KGReasoning(nn.Module):
             t = (i+1) * dim
             if i == self.fraction - 1:
                 t += rest
-            fraction_embedding = embedding[:, s:t]
+            fraction_embedding = embedding[:, s:t]  #（batch_size, fraction_size）
             if fraction_embedding.sum().item() == 0:
                 continue
             nonzero = torch.nonzero(fraction_embedding, as_tuple=True)[1]
-            fraction_embedding = fraction_embedding[:, nonzero]
-            fraction_r_embedding = r_embedding[i].to_dense()[nonzero, :].unsqueeze(0)
+            fraction_embedding = fraction_embedding[:, nonzero] # (1, 1)
+            fraction_r_embedding = r_embedding[i].to_dense()[nonzero, :].unsqueeze(0)   # (1, 1, 14951)
             if is_neg:
                 fraction_r_embedding = torch.minimum(torch.ones_like(fraction_r_embedding).to(torch.float), self.neg_scale*fraction_r_embedding)
                 fraction_r_embedding = 1. - fraction_r_embedding
+            # 逐元素相乘，形状相同/广播
             fraction_embedding_premax = fraction_r_embedding * fraction_embedding.unsqueeze(-1)
-            fraction_embedding, tmp_argmax = torch.max(fraction_embedding_premax, dim=1)
+            fraction_embedding, tmp_argmax = torch.max(fraction_embedding_premax, dim=1)    # (1, 14951)
             tmp_argmax = nonzero[tmp_argmax.squeeze()] + s
             new_argmax = (fraction_embedding > new_embedding).to(torch.long).squeeze()
             r_argmax = new_argmax * tmp_argmax + (1-new_argmax) * r_argmax
+            # 取两者最大值
             new_embedding = torch.maximum(new_embedding, fraction_embedding)
         return new_embedding, r_argmax.cpu().numpy()
     
@@ -127,11 +130,12 @@ class KGReasoning(nn.Module):
 
     def embed_query(self, queries, query_structure, idx):
         '''
-        Iterative embed a batch of queries with same structure
-        queries: a flattened batch of queries
-        query_structure: ('e', ('r',)),
-        specializations: [[([830, 77], 1.0, ('e', ('r',))), 
-                            ([830, 44], 0.8337468982630273, ('e', ('r',)))]],
+            Iterative embed a batch of queries with same structure
+            queries: a flattened batch of queries, eg: tensor([[2105, 1592]], device='cuda:0') -> (batch_size, query_length)
+            query_structure: ('e', ('r',)),
+            specializations: [[([830, 77], 1.0, ('e', ('r',))), 
+                                ([830, 44], 0.8337468982630273, ('e', ('r',)))]],
+            idx: 0
         '''
         all_relation_flag = True
         exec_query = []
@@ -140,11 +144,13 @@ class KGReasoning(nn.Module):
             if ele not in ['r', 'n']:
                 all_relation_flag = False
                 break
+        # 1p, 2p, 3p
         if all_relation_flag:
             # 起始位为 实体
             if query_structure[0] == 'e':
                 bsz = queries.size(0)
                 embedding = torch.zeros(bsz, self.nentity).to(torch.float).to(self.device)
+                # idx位置置1
                 embedding.scatter_(-1, queries[:, idx].unsqueeze(-1), 1)
                 exec_query.append(queries[:, idx].item())
                 idx += 1
@@ -156,8 +162,11 @@ class KGReasoning(nn.Module):
                 if query_structure[-1][i] == 'n':
                     assert (queries[:, idx] == -2).all()
                     r_exec_query.append('n')
+                # 该位置是'r'
                 else:
+                    # 已经分片过的relation_embedding
                     r_embedding = self.relation_embeddings[queries[0, idx]]
+                    # 下一个位置是'n'
                     if (i < len(query_structure[-1]) - 1) and query_structure[-1][i+1] == 'n':
                         embedding, r_argmax = self.relation_projection(embedding, r_embedding, True)
                     else:
@@ -166,8 +175,14 @@ class KGReasoning(nn.Module):
                     r_exec_query.append('e')
                 idx += 1
             r_exec_query.pop()
+            """
+                以1p举例:
+                    exec_query: [3384, [(551, array([0., 0., ..., 0.], dtype=float32)), 
+                                'e']]
+            """
             exec_query.append(r_exec_query)
             exec_query.append('e')
+        # "i", "u"
         else:
             embedding_list = []
             union_flag = False

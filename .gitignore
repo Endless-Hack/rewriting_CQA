@@ -4,7 +4,10 @@ data/
 neural_adj/
 .idea/
 *.txt
-/kbc/src/
+/kbc/src/rule
+/kbc/src/data
+/kbc/src/src_data
+/kbc/src/__pycache__
 /kbc/doc/
 /kbc/FB15K/
 /kbc/FB15K-237/

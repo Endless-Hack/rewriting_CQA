@@ -18,7 +18,7 @@ sys.path.append('rp')
 from kbc.src.models import ComplEx
 
 def load_kbc(model_path, device, nentity, nrelation):
-    model = ComplEx(sizes=[nentity, nrelation, nentity], rank=1000, init_size=1e-3)
+    model = ComplEx(sizes=[nentity, nrelation, nentity], rank=1500, init_size=1e-3)
     state_dict = torch.load(model_path)
     model.load_state_dict(state_dict)
     model.to(device)

@@ -102,6 +102,7 @@ def setup_loss(opt):
         loss = nn.BCEWithLogitsLoss(reduction='mean')
     elif opt['world'] == 'sLCWA+set':
         pass
+    # 默认为交叉熵损失函数
     elif opt['world'] == 'LCWA':
         loss = nn.CrossEntropyLoss(reduction='mean')
     return loss
@@ -295,14 +296,22 @@ class KBCEngine(object):
                     head_truth = self.triple_truth_value(rule_head_batch)
                     # print(head_truth)
                     # t-norm
-                    rule_truth = self.t_norm_equation(head_truth, body_truth)
-                    rule_neg_truth = self.t_norm_equation(neg_head_truth, neg_body_truth)
-                    # print('after t-norm', rule_neg_truth.shape) #(batch_size,1)
+                    rule_truth = self.t_norm_equation(head_truth, body_truth).squeeze()
+                    rule_neg_truth = self.t_norm_equation(neg_head_truth, neg_body_truth).squeeze()
+                    # print('after t-norm', rule_truth.shape)     #(batch_size)
+                    # print("rule_confs: ", rule_confs.shape)     #(batch_size)
 
-                    y = torch.full_like(body_truth, fill_value=1)
+                    y = torch.full_like(rule_truth, fill_value=1)
+                    _y = torch.full_like(rule_neg_truth, fill_value=0)
                     # print("positive score: ", rule_confs*rule_truth)
                     # print("negative score: ", (1-rule_confs)*rule_neg_truth)
-                    l_sum = rule1_loss(rule_confs*rule_truth, (1-rule_confs)*rule_neg_truth, y)
+                    # l_sum = rule1_loss(rule_confs*rule_truth, (1-rule_confs)*rule_neg_truth, y)
+                    # l_sum = nn.functional.binary_cross_entropy(rule_truth, y, reduction="mean")
+                    # 考虑置信度
+                    # l_sum = nn.functional.binary_cross_entropy(rule_confs*rule_truth, y, reduction="mean")
+                    # 考虑置信度 + 负例
+                    l_sum = nn.functional.binary_cross_entropy(rule_confs*rule_truth, y, reduction="mean") + \
+                        nn.functional.binary_cross_entropy((1-rule_confs)*rule_neg_truth, _y, reduction="mean")
 
                     self.optimizer.zero_grad()
                     l_sum.backward()
@@ -373,12 +382,19 @@ class KBCEngine(object):
 
                     # print(neg_head_truth.shape)     #(batch_size, 1)
                     # t-norm
-                    rule_truth = self.t_norm_equation(head_truth, self.t_norm(body1_truth, body2_truth))
+                    rule_truth = self.t_norm_equation(head_truth, self.t_norm(body1_truth, body2_truth)).squeeze()
                     rule_neg_truth = self.t_norm_equation(neg_head_truth,
-                                                        self.t_norm(neg_body1_truth, neg_body2_truth))
+                                                        self.t_norm(neg_body1_truth, neg_body2_truth)).squeeze()
 
-                    y = torch.full_like(body1_truth, fill_value=1)
-                    l_sum = rule2_loss(rule_confs*rule_truth, (1-rule_confs)*rule_neg_truth, y)
+                    y = torch.full_like(rule_truth, fill_value=1)
+                    _y = torch.full_like(rule_neg_truth, fill_value=0)
+                    # l_sum = rule2_loss(rule_confs*rule_truth, (1-rule_confs)*rule_neg_truth, y)
+                    # l_sum = nn.functional.binary_cross_entropy(rule_truth, y, reduction="mean")
+                    # 考虑置信度
+                    # l_sum = nn.functional.binary_cross_entropy(rule_confs*rule_truth, y, reduction="mean")
+                    # 考虑置信度 + 负例
+                    l_sum = nn.functional.binary_cross_entropy(rule_confs*rule_truth, y, reduction="mean") + \
+                        nn.functional.binary_cross_entropy((1-rule_confs)*rule_neg_truth, _y, reduction="mean")
 
                     self.optimizer.zero_grad()
                     # 异常检测开启

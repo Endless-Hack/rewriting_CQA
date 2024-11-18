@@ -347,7 +347,9 @@ def evaluate(model, tp_answers, fn_answers, args, dataloader, query_name_dict, d
             set_num = query_set_embedding.shape[0]
             query_set_embedding = query_set_embedding * torch.tensor([batch_spe_confs_list]).T.cuda()
             # 基于score进行聚合 1.对各个query score取max
-            query_set_embedding, _ = torch.max(query_set_embedding, dim=0)
+            # query_set_embedding, _ = torch.max(query_set_embedding, dim=0)
+            # 基于score进行聚合 2.对各个query score取avg
+            query_set_embedding = torch.mean(query_set_embedding, dim=0)
             # (entity_num)
             query_set_embedding = query_set_embedding.squeeze()
             # 降序排列

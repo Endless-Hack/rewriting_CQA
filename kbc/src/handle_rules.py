@@ -12,9 +12,9 @@ current_path = os.path.dirname(__file__)
 def grounding_rule():
     type1_rules, type2_rules = load_rules()
 
-    with open(current_path+'/../../data/FB15k-betae/id2rel.pkl','rb') as f:
+    with open(current_path+'/../../data/FB15K-betae/id2rel.pkl','rb') as f:
         id_to_rel = pickle.load(f)
-    with open(current_path+'/../../data/FB15k-betae/id2ent.pkl','rb') as f:
+    with open(current_path+'/../../data/FB15K-betae/id2ent.pkl','rb') as f:
         id_to_ent = pickle.load(f)
 
     type1_rule_ids = []
@@ -36,7 +36,10 @@ def grounding_rule():
             if start==-1 or end == -1:
                 continue
             rule_entities = rule_body[start+1 : end].split(',')
-            rule_rel = [k for k,v in id_to_rel.items() if v==("+" + rule_body[0 : start])][0]
+            # for FB15K/FB15K-237
+            rule_rel = [k for k, v in id_to_rel.items() if v == ("+" + rule_body[0: start])][0]
+            # for NELL: nell rel没有"+"
+            # rule_rel = [k for k, v in id_to_rel.items() if v == (rule_body[0: start])][0]
             rule_triples.append([rule_entities[0], rule_rel, rule_entities[1]])
             # 维护一个哈希map 实体 -> id
             for i in range(len(rule_entities)):
@@ -67,7 +70,10 @@ def grounding_rule():
             if start == -1 or end == -1:
                 continue
             rule_entities = rule_body[start + 1: end].split(',')
+            # for FB15K/FB15K-237
             rule_rel = [k for k, v in id_to_rel.items() if v == ("+" + rule_body[0: start])][0]
+            # for NELL: nell rel没有"+"
+            # rule_rel = [k for k, v in id_to_rel.items() if v == (rule_body[0: start])][0]
             rule_triples.append([rule_entities[0], rule_rel, rule_entities[1]])
             for i in range(len(rule_entities)):
                 if entity_map.get(rule_entities[i]) == None:
@@ -94,8 +100,8 @@ def grounding_rule():
     return type1_rule_ids, type1_rule_confs, type2_rule_ids, type2_rule_confs
 
 def load_rules():
-    path1 = '/rule/FB15k_type1_rules.txt'
-    path2 = '/rule/FB15k_type2_rules.txt'
+    path1 = '/rule/FB15K_type1_rules.txt'
+    path2 = '/rule/FB15K_type2_rules.txt'
 
     with open(current_path+path1, 'r') as f:
         type1_rules = f.readlines()
@@ -107,7 +113,7 @@ def load_rules():
 
 # if __name__ == '__main__':
 #     type1_rule_ids, type1_rule_confs, type2_rule_ids, type2_rule_confs = grounding_rule()
-
+#     print("type1_rule_ids: ", type1_rule_ids)
 #     for i in range(10):
 #         print(type1_rule_ids[i])
 #         print(type1_rule_confs[i])

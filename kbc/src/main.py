@@ -49,7 +49,7 @@ parser.add_argument(
     help="Dataset in {}".format(datasets)
 )
 parser.add_argument('--reciprocal', type=ast.literal_eval, default=False)
-models = ['CP', 'ComplEx', 'TransE', 'RESCAL', 'TuckER']
+models = ['CP', 'ComplEx', 'TransE', 'RESCAL', 'TuckER', 'DistMult']
 parser.add_argument(
     '--model', choices=models,
     help="Model in {}".format(models)

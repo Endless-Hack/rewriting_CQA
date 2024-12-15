@@ -15,7 +15,7 @@ import copy
 import random
 from tqdm import tqdm
 from datasets import Dataset
-from models import CP, ComplEx, TransE, RESCAL, TuckER
+from models import CP, ComplEx, TransE, RESCAL, TuckER, DistMult
 from regularizers import F2, N3
 from utils import avg_both, setup_optimizer, get_git_revision_hash, set_seed
 import handle_rules as hr 
@@ -26,9 +26,9 @@ type1_rule_ids, type1_rule_confs, type2_rule_ids, type2_rule_confs = hr.groundin
 
 # 采样grounding rule负样本
 def grounding_negative_sample(rules_list: list):
-    with open(current_path + '/../../data/FB15k-betae/id2rel.pkl', 'rb') as f:
+    with open(current_path + '/../../data/FB15K-betae/id2rel.pkl', 'rb') as f:
         id_to_rel = pickle.load(f)
-    with open(current_path + '/../../data/FB15k-betae/id2ent.pkl', 'rb') as f:
+    with open(current_path + '/../../data/FB15K-betae/id2ent.pkl', 'rb') as f:
         id_to_ent = pickle.load(f)
     rel_num = len(id_to_rel)
     ent_num = len(id_to_ent)
@@ -87,6 +87,8 @@ def setup_model(opt):
         model = TransE(opt['size'], opt['rank'], opt['init'])
     elif opt['model'] == 'ComplEx':
         model = ComplEx(opt['size'], opt['rank'], opt['init'])
+    elif opt['model'] == 'DistMult':
+        model = DistMult(opt['size'], opt['rank'], opt['init'])
     elif opt['model'] == 'TuckER':
         model = TuckER(opt['size'], opt['rank'], opt['rank_r'], opt['init'], opt['dropout'])
     elif opt['model'] == 'RESCAL':
@@ -267,37 +269,21 @@ class KBCEngine(object):
 
                 # grounding type1 rule训练
                 while rule1_begin < len(type1_rule_ids):
-                    if rule1_begin + grounding1_batch < len(type1_rule_ids):
-                        rule_head_batch = rule1_heads[  # tensor:[100, 3]
-                                        rule1_begin: rule1_begin + grounding1_batch]
-                        rule_body_batch = rule1_bodys[  # tensor:[100, 3]
-                                        rule1_begin: rule1_begin + grounding1_batch]
-                        neg_rule_head_batch = neg_rule1_heads[  # tensor:[100, 3]
-                                            rule1_begin: rule1_begin + grounding1_batch]
-                        neg_rule_body_batch = neg_rule1_bodys[  # tensor:[100, 3]
-                                            rule1_begin: rule1_begin + grounding1_batch]
-                        rule_confs = rule1_confs[
-                                            rule1_begin: rule1_begin + grounding1_batch]
-                    else:
-                        rule_head_batch = rule1_heads[  # tensor:[100, 3]
-                                        rule1_begin: -1]
-                        rule_body_batch = rule1_bodys[  # tensor:[100, 3]
-                                        rule1_begin: -1]
-                        neg_rule_head_batch = neg_rule1_heads[  # tensor:[100, 3]
-                                            rule1_begin: -1]
-                        neg_rule_body_batch = neg_rule1_bodys[  # tensor:[100, 3]
-                                            rule1_begin: -1]
-                        rule_confs = rule1_confs[
-                                            rule1_begin: -1]
+                    # 批量切片操作
+                    rule_head_batch = self.get_batch(rule1_heads, rule1_begin, grounding1_batch, len(type1_rule_ids))
+                    rule_body_batch = self.get_batch(rule1_bodys, rule1_begin, grounding1_batch, len(type1_rule_ids))
+                    neg_rule_head_batch = self.get_batch(neg_rule1_heads, rule1_begin, grounding1_batch, len(type1_rule_ids))
+                    neg_rule_body_batch = self.get_batch(neg_rule1_bodys, rule1_begin, grounding1_batch, len(type1_rule_ids))
+                    rule_confs = self.get_batch(rule1_confs, rule1_begin, grounding1_batch, len(type1_rule_ids))
+
                     # 负样本采样
                     neg_head_truth = self.triple_truth_value(neg_rule_head_batch)
                     neg_body_truth = self.triple_truth_value(neg_rule_body_batch)
                     body_truth = self.triple_truth_value(rule_body_batch)
-                    head_truth = self.triple_truth_value(rule_head_batch)
-                    # print(head_truth)
+                    head_truth = self.triple_truth_value(rule_head_batch)   # (batch_size, value)
                     # t-norm
-                    rule_truth = self.t_norm_equation(head_truth, body_truth).squeeze()
-                    rule_neg_truth = self.t_norm_equation(neg_head_truth, neg_body_truth).squeeze()
+                    rule_truth = self.t_norm_equation(head_truth, body_truth).squeeze(dim=1)
+                    rule_neg_truth = self.t_norm_equation(neg_head_truth, neg_body_truth).squeeze(dim=1)
                     # print('after t-norm', rule_truth.shape)     #(batch_size)
                     # print("rule_confs: ", rule_confs.shape)     #(batch_size)
 
@@ -341,37 +327,14 @@ class KBCEngine(object):
 
                 # grounding type2 rule训练
                 while rule2_begin < len(type2_rule_ids):
-                    if rule2_begin <= len(type2_rule_ids):
-                        rule_head_batch = rule2_heads[  # tensor:[100, 3]
-                                        rule2_begin:rule2_begin + grounding2_batch]
-                        rule_body1_batch = rule2_body1s[  # tensor:[100, 3]
-                                        rule2_begin:rule2_begin + grounding2_batch]
-                        rule_body2_batch = rule2_body2s[  # tensor:[100, 3]
-                                        rule2_begin:rule2_begin + grounding2_batch]
-                        neg_rule_head_batch = neg_rule2_heads[  # tensor:[100, 3]
-                                            rule2_begin:rule2_begin + grounding2_batch]
-                        neg_rule_body1_batch = neg_rule2_body1s[  # tensor:[100, 3]
-                                            rule2_begin:rule2_begin + grounding2_batch]
-                        neg_rule_body2_batch = neg_rule2_body2s[  # tensor:[100, 3]
-                                            rule2_begin:rule2_begin + grounding2_batch]
-                        rule_confs = rule2_confs[  # tensor:[100, 3]
-                                            rule2_begin:rule2_begin + grounding2_batch]
-                    else:
-                        rule_head_batch = rule2_heads[  # tensor:[100, 3]
-                                          rule2_begin: -1]
-                        rule_body1_batch = rule2_body1s[  # tensor:[100, 3]
-                                           rule2_begin: -1]
-                        rule_body2_batch = rule2_body2s[  # tensor:[100, 3]
-                                           rule2_begin: -1]
-                        neg_rule_head_batch = neg_rule2_heads[  # tensor:[100, 3]
-                                              rule2_begin: -1]
-                        neg_rule_body1_batch = neg_rule2_body1s[  # tensor:[100, 3]
-                                               rule2_begin: -1]
-                        neg_rule_body2_batch = neg_rule2_body2s[  # tensor:[100, 3]
-                                               rule2_begin: -1]
-                        rule_confs = rule2_confs[  # tensor:[100, 3]
-                                               rule2_begin: -1]
-
+                    # 批量切片操作
+                    rule_head_batch = self.get_batch(rule2_heads, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    rule_body1_batch = self.get_batch(rule2_body1s, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    rule_body2_batch = self.get_batch(rule2_body2s, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    neg_rule_head_batch = self.get_batch(neg_rule2_heads, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    neg_rule_body1_batch = self.get_batch(neg_rule2_body1s, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    neg_rule_body2_batch = self.get_batch(neg_rule2_body2s, rule2_begin, grounding2_batch, len(type2_rule_ids))
+                    rule_confs = self.get_batch(rule2_confs, rule2_begin, grounding2_batch, len(type2_rule_ids))
                     # 负样本采样
                     neg_head_truth = self.triple_truth_value(neg_rule_head_batch)
                     neg_body1_truth = self.triple_truth_value(neg_rule_body1_batch)
@@ -382,9 +345,9 @@ class KBCEngine(object):
 
                     # print(neg_head_truth.shape)     #(batch_size, 1)
                     # t-norm
-                    rule_truth = self.t_norm_equation(head_truth, self.t_norm(body1_truth, body2_truth)).squeeze()
+                    rule_truth = self.t_norm_equation(head_truth, self.t_norm(body1_truth, body2_truth)).squeeze(dim=1)
                     rule_neg_truth = self.t_norm_equation(neg_head_truth,
-                                                        self.t_norm(neg_body1_truth, neg_body2_truth)).squeeze()
+                                                        self.t_norm(neg_body1_truth, neg_body2_truth)).squeeze(dim=1)
 
                     y = torch.full_like(rule_truth, fill_value=1)
                     _y = torch.full_like(rule_neg_truth, fill_value=0)
@@ -479,6 +442,11 @@ class KBCEngine(object):
         # l = l_fit + l_reg
         l = torch.sigmoid(score)
         return l
+
+    # 定义函数进行切片
+    def get_batch(self, data, start, batch_size, total_length):
+        end = min(start + batch_size, total_length)
+        return data[start:end]
 
     def rule_truth_value(self, rule: list):
         pass

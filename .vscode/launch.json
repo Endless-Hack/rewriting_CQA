@@ -11,9 +11,9 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "env": {"CUDA_VISIBLE_DEVICES": "0,1"},
-            "args": ["--data_path", "data/FB15k-betae", "--kbc_path", "kbc/FB15K/best_valid.model",
-                "--fraction", "10", "--thrshd", "0.001", "--neg_scale", "6"]
+            "env": {"CUDA_VISIBLE_DEVICES": "1"},
+            "args": ["--data_path", "data/FB15K-betae", "--kbc_path", "kbc/FB15K/best_valid.model",
+                "--fraction", "10", "--thrshd", "0.001", "--neg_scale", "6", "--query_rew"]
         }
     ]
 }

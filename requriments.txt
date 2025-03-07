@@ -1,0 +1,12 @@
+软件运行环境配置：
+python3.8
+torch                   2.2.2
+torchaudio              2.2.2
+torchmetrics            1.4.2
+torchvision             0.17.2
+tqdm                    4.66.5
+numpy                   1.24.3
+pandas                  2.0.3
+硬件运行配置：
+GPU  Quadro RTX 6000
+CUDA   12.2

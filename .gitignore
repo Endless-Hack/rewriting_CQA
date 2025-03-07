@@ -1,6 +1,8 @@
 results/
 KGE_models/
-data/
+data/FB15K-237-betae/
+data/FB15K-betae/
+data/NELL-betae/
 neural_adj/
 .idea/
 /kbc/src/rule
